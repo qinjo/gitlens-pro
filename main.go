@@ -29,14 +29,19 @@ var predefinedPaths = []ExtensionPath{
 		Description: "标准 VSCode",
 	},
 	{
-		Name:        "Cursor",
-		Path:        filepath.Join(".cursor", "extensions"),
-		Description: "Cursor 编辑器",
+		Name:        "VSCode Server",
+		Path:        filepath.Join(".vscode-server", "extensions"),
+		Description: "VSCode 服务端",
 	},
 	{
 		Name:        "VSCode Insiders",
 		Path:        filepath.Join(".vscode-insiders", "extensions"),
 		Description: "VSCode 预览版",
+	},
+	{
+		Name:        "Cursor",
+		Path:        filepath.Join(".cursor", "extensions"),
+		Description: "Cursor 编辑器",
 	},
 	{
 		Name:        "Windsurf",
