@@ -140,8 +140,8 @@ func main() {
 		filepath.Join(extensionPath, "dist", "browser", "gitlens.js"),
 	}
 
-	// 如果是版本17，添加graph.js文件
-	if isVersion17(dirName) {
+	// 如果是版本17及以上，添加graph.js文件
+	if isVersion17OrAbove(dirName) {
 		filesToModify = append(filesToModify, filepath.Join(extensionPath, "dist", "webviews", "graph.js"))
 	}
 
@@ -223,8 +223,8 @@ func isVersion15(dirName string) bool {
 	return pattern.MatchString(dirName)
 }
 
-func isVersion17(dirName string) bool {
-	pattern := regexp.MustCompile(`^eamodio\.gitlens-17\.\d+\.\d+(?:-universal)?$`)
+func isVersion17OrAbove(dirName string) bool {
+	pattern := regexp.MustCompile(`^eamodio\.gitlens-(17|18)\.\d+\.\d+(?:-universal)?$`)
 	return pattern.MatchString(dirName)
 }
 
@@ -257,7 +257,7 @@ func processFile(filePath string) error {
 		return processVersion15File(filePath, content)
 	}
 
-	if isVersion17(dirName) {
+	if isVersion17OrAbove(dirName) {
 		return processVersion17File(filePath, content)
 	}
 
@@ -325,11 +325,11 @@ func processVersion16File(filePath string, content []byte) error {
 	return nil
 }
 
-// 处理 17.x 版本的文件
+// 处理 17.x 及 18.x 版本的文件
 func processVersion17File(filePath string, content []byte) error {
-	fmt.Printf("处理版本17的文件: %s\n", filePath)
+	fmt.Printf("处理版本17/18的文件: %s\n", filePath)
 
-	// 如果是graph.js文件，只执行版本17的处理
+	// 如果是graph.js文件，只执行版本17/18的处理
 	if strings.Contains(filePath, "webviews") && strings.Contains(filePath, "graph.js") {
 		return processVersion17GraphFile(filePath, content)
 	}
@@ -338,17 +338,46 @@ func processVersion17File(filePath string, content []byte) error {
 	return processVersion16File(filePath, content)
 }
 
-// 处理 17.x 版本的graph.js文件
+// 处理 17.x 及 18.x 版本的graph.js文件
 func processVersion17GraphFile(filePath string, content []byte) error {
 	contentStr := string(content)
 
 	// 查找匹配模式 - 对应JavaScript中的 /(\(|=)(this\.(graphS|s)tate\.allowed)/g
+	// v17 的 gate 遮罩用 ?hidden=${!1!==this.state.allowed} 绑定，通过取反 this.state.allowed 来隐藏遮罩
 	pattern := regexp.MustCompile(`(\(|=)(this\.(graphS|s)tate\.allowed)`)
 	matches := pattern.FindAllStringSubmatch(contentStr, -1)
 
 	if len(matches) == 0 {
-		fmt.Printf("在文件中未找到匹配模式: %s\n", filePath)
-		return nil // 不报错，只是跳过
+		// v18 起 gate 遮罩改由 gl-feature-gate 组件内部根据订阅状态控制：
+		// render(){if(lC(this.state))return;...}，其中 lC(t){return null!=t&&(t===lf.Trial||t===lf.Paid)}
+		// 同时标题栏搜索行/头部元素受 graphState.allowed 门控（来自 updateState 的响应式属性赋值）
+		// 这里分别强制 lC 恒返回 true（遮罩不渲染）、allowed 恒为 true（搜索行/头部元素不隐藏）
+		newContent := contentStr
+		modified := false
+
+		lCPattern := regexp.MustCompile(`null!=t&&\(t===lf\.Trial\|\|t===lf\.Paid\)`)
+		if lCPattern.MatchString(newContent) {
+			newContent = lCPattern.ReplaceAllString(newContent, `!0`)
+			modified = true
+		}
+
+		allowedPattern := regexp.MustCompile(`case"allowed":this\.allowed=t\.allowed\?\?!1;break;`)
+		if allowedPattern.MatchString(newContent) {
+			newContent = allowedPattern.ReplaceAllString(newContent, `case"allowed":this.allowed=!0;break;`)
+			modified = true
+		}
+
+		if !modified {
+			fmt.Printf("在文件中未找到匹配模式: %s\n", filePath)
+			return nil // 不报错，只是跳过
+		}
+
+		if err := os.WriteFile(filePath, []byte(newContent), 0644); err != nil {
+			return fmt.Errorf("写入文件失败: %v", err)
+		}
+
+		fmt.Printf("成功修改文件: %s (v18 gate 遮罩及 allowed 解锁)\n", filePath)
+		return nil
 	}
 
 	// 替换所有匹配项，在匹配的变量前添加感叹号
