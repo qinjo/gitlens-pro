@@ -224,7 +224,12 @@ func isVersion15(dirName string) bool {
 }
 
 func isVersion17OrAbove(dirName string) bool {
-	pattern := regexp.MustCompile(`^eamodio\.gitlens-(17|18)\.\d+\.\d+(?:-universal)?$`)
+	pattern := regexp.MustCompile(`^eamodio\.gitlens-(17|18|19)\.\d+\.\d+(?:-universal)?$`)
+	return pattern.MatchString(dirName)
+}
+
+func isVersion19OrAbove(dirName string) bool {
+	pattern := regexp.MustCompile(`^eamodio\.gitlens-(19)\.\d+\.\d+(?:-universal)?$`)
 	return pattern.MatchString(dirName)
 }
 
@@ -255,6 +260,10 @@ func processFile(filePath string) error {
 
 	if isVersion15(dirName) {
 		return processVersion15File(filePath, content)
+	}
+
+	if isVersion19OrAbove(dirName) {
+		return processVersion19File(filePath, content)
 	}
 
 	if isVersion17OrAbove(dirName) {
@@ -338,6 +347,69 @@ func processVersion17File(filePath string, content []byte) error {
 	return processVersion16File(filePath, content)
 }
 
+// 处理 19.x 版本的文件
+func processVersion19File(filePath string, content []byte) error {
+	fmt.Printf("处理版本19的文件: %s\n", filePath)
+
+	// 如果是graph.js文件，执行v19的专用处理
+	if strings.Contains(filePath, "webviews") && strings.Contains(filePath, "graph.js") {
+		return processVersion19GraphFile(filePath, content)
+	}
+
+	// 其他文件（gitlens.js）执行版本16的处理
+	return processVersion16File(filePath, content)
+}
+
+// 处理 19.x 版本的graph.js文件
+func processVersion19GraphFile(filePath string, content []byte) error {
+	contentStr := string(content)
+	modified := false
+
+	// v19 有以下 gate 拦截点：
+	// 1. ensureConflictsFetched() 用 lV(n) 判断是否有 Pro 权限拉取冲突预览
+	// 2. gl-feature-gate 组件 render() 用 lV(this.state) 控制 gate 显示
+	// 3. mergeTarget 用 lV(r) 控制是否获取合并目标
+	// 4. isProAccount 用 lV(...) 判断 Pro 状态
+
+	// 匹配 lV(t){return null!=t&&(t===lD.Trial||t===lD.Paid)} 强制返回 !0
+	gateFuncPattern := regexp.MustCompile(`function lV\(t\)\{return null!=t&&\(t===lD\.Trial\|\|t===lD\.Paid\)\}`)
+	if gateFuncPattern.MatchString(contentStr) {
+		newContent := gateFuncPattern.ReplaceAllString(contentStr, `function lV(t){return !0}`)
+		contentStr = newContent
+		modified = true
+		fmt.Println("  已替换 lV 函数强制返回 true")
+	}
+
+	// 强制 allowed 恒为 true（解锁标题栏搜索行/头部元素/graph 主视图）
+	allowedPattern := regexp.MustCompile(`case"allowed":this\.allowed=t\.allowed\?\?!1;break;`)
+	if allowedPattern.MatchString(contentStr) {
+		contentStr = allowedPattern.ReplaceAllString(contentStr, `case"allowed":this.allowed=!0;break;`)
+		modified = true
+		fmt.Println("  已替换 allowed 赋值强制为 true")
+	}
+
+	// v17 风格的 this.graphState.allowed 取反（用于 render 中的 gate 条件）
+	v17Pattern := regexp.MustCompile(`(\(|=)(this\.(graphS|s)tate\.allowed)`)
+	v17Matches := v17Pattern.FindAllStringSubmatch(contentStr, -1)
+	if len(v17Matches) > 0 {
+		contentStr = v17Pattern.ReplaceAllString(contentStr, `$1!$2`)
+		modified = true
+		fmt.Printf("  已替换 %d 个 v17 风格的 allowed 取反\n", len(v17Matches))
+	}
+
+	if !modified {
+		fmt.Printf("在文件中未找到匹配模式: %s\n", filePath)
+		return nil // 不报错，只是跳过
+	}
+
+	if err := os.WriteFile(filePath, []byte(contentStr), 0644); err != nil {
+		return fmt.Errorf("写入文件失败: %v", err)
+	}
+
+	fmt.Printf("成功修改文件: %s (v19 全面解锁)\n", filePath)
+	return nil
+}
+
 // 处理 17.x 及 18.x 版本的graph.js文件
 func processVersion17GraphFile(filePath string, content []byte) error {
 	contentStr := string(content)
@@ -348,16 +420,18 @@ func processVersion17GraphFile(filePath string, content []byte) error {
 	matches := pattern.FindAllStringSubmatch(contentStr, -1)
 
 	if len(matches) == 0 {
-		// v18 起 gate 遮罩改由 gl-feature-gate 组件内部根据订阅状态控制：
-		// render(){if(lC(this.state))return;...}，其中 lC(t){return null!=t&&(t===lf.Trial||t===lf.Paid)}
+		// v18/v19 起 gate 遮罩改由 gl-feature-gate 组件内部根据订阅状态控制：
+		// render(){if(lV(this.state))return;...}，其中 lV(t){return null!=t&&(t===lD.Trial||t===lD.Paid)}
+		// 变量名随压缩变化：v18 为 lC/lf，v19 为 lV/lD
 		// 同时标题栏搜索行/头部元素受 graphState.allowed 门控（来自 updateState 的响应式属性赋值）
-		// 这里分别强制 lC 恒返回 true（遮罩不渲染）、allowed 恒为 true（搜索行/头部元素不隐藏）
+		// 这里分别强制 gate 函数恒返回 true（遮罩不渲染）、allowed 恒为 true（搜索行/头部元素不隐藏）
 		newContent := contentStr
 		modified := false
 
-		lCPattern := regexp.MustCompile(`null!=t&&\(t===lf\.Trial\|\|t===lf\.Paid\)`)
-		if lCPattern.MatchString(newContent) {
-			newContent = lCPattern.ReplaceAllString(newContent, `!0`)
+		// 匹配 lC(t){return null!=t&&(t===lf.Trial||t===lf.Paid)} 或 lV(t){return null!=t&&(t===lD.Trial||t===lD.Paid)}
+		gateFuncPattern := regexp.MustCompile(`null!=t&&\(t===(lf|lD)\.Trial\|\|t===(lf|lD)\.Paid\)`)
+		if gateFuncPattern.MatchString(newContent) {
+			newContent = gateFuncPattern.ReplaceAllString(newContent, `!0`)
 			modified = true
 		}
 
@@ -376,7 +450,7 @@ func processVersion17GraphFile(filePath string, content []byte) error {
 			return fmt.Errorf("写入文件失败: %v", err)
 		}
 
-		fmt.Printf("成功修改文件: %s (v18 gate 遮罩及 allowed 解锁)\n", filePath)
+		fmt.Printf("成功修改文件: %s (v18/v19 gate 遮罩及 allowed 解锁)\n", filePath)
 		return nil
 	}
 
